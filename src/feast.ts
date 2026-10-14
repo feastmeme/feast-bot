@@ -7,6 +7,7 @@
  *   quote    GET /api/v1/quote            a simulation of the Feast leg alone
  *   ohlcv    GET /api/v1/ohlcv            candles, prices as sqrtPriceX96
  *   trades   GET /api/v1/events?types=trade
+ *   launches GET /api/v1/me/launches     a creator's coins (public: no session)
  *   holders  a pool's `market.holders` (there is no separate holders endpoint)
  *
  * Every answer carries `chainId`, and every answer is checked against 56: a
@@ -48,6 +49,8 @@ export type ApiPool = {
     capBinding: boolean;
     open: boolean;
   };
+  /** The coin's creator. */
+  creator?: Hex;
   createdAt: string | null;
   createdAtBlock: number | null;
   market: {
@@ -69,13 +72,26 @@ export type ApiQuote = {
 };
 
 export type ApiTrade = {
+  /** Opaque: where to read on from (`since_cursor`, exclusive). */
+  cursor: string;
   at: string;
   blockNumber: number;
   txHash: Hex;
   side: "buy" | "sell";
+  /** Who traded: the transaction's sender. */
+  payer: Hex;
   coinAmount: string;
+  /** Quote-asset base units, the hook's fee included. */
   quoteAmount: string;
   sqrtPriceX96After: string;
+};
+
+/** One coin a creator launched, as `/api/v1/me/launches` serves it: its figures, and words this kit never reads. */
+export type ApiLaunch = {
+  coin: { address: Hex };
+  holders: number;
+  /** Every fill since launch. */
+  trades: number;
 };
 
 export class ApiError extends Error {
@@ -211,6 +227,12 @@ export class FeastApi {
     return { trades: body.events, nextCursor: body.nextCursor };
   }
 
+  /** Every coin `wallet` has launched: a public read, no session needed. */
+  async launches(wallet: Hex): Promise<ApiLaunch[]> {
+    const body = (await this.get("/api/v1/me/launches", { wallet })) as { launches: ApiLaunch[] };
+    return body.launches;
+  }
+
   /** A pool's holder count, from its market figures; null when the index has none. */
   async holders(poolId: Hex): Promise<number | null> {
     const pool = await this.pool(poolId);
@@ -319,6 +341,12 @@ export class ChainReader {
       throw new PoolKeyMismatchError(`the factory's pool key for ${coin} hashes to ${poolIdOf(key)}, not ${poolId}`);
     }
     return key;
+  }
+
+  /** A coin's pool id, from the Feast factory's pool key: how a coin address in the config finds its pool. */
+  async poolIdOfCoin(coin: Hex): Promise<Hex> {
+    const key = (await this.client.readContract({ address: CONTRACTS.factory, abi: factoryAbi, functionName: "poolKeyFor", args: [coin] })) as PoolKey;
+    return poolIdOf(key);
   }
 
   /** The pool's price now, quote asset per coin. */

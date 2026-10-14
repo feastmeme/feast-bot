@@ -2,14 +2,22 @@
 /**
  * feast-bot — the command line.
  *
- *   feast-bot run --config bot.toml [--live] [--once]
+ *   feast-bot run --config bot.toml [--live] [--once] [--new-session]
  *   feast-bot quote <poolId> <amount> [--side buy|sell] [--config bot.toml]
  *   feast-bot pools [--limit 50] [--config bot.toml]
+ *   feast-bot explain [--config bot.toml] [--last 10]
  *
  * `run` is a DRY RUN unless `--live` is given: it reads, decides, quotes and
  * prints each order it would place — the calldata, the quote and the expected
  * slippage — and sends nothing. Only `--live` reads the key, and only `--live`
  * builds anything that can send.
+ *
+ * With `[llm_manager]` on, `run` also needs ANTHROPIC_API_KEY in the
+ * environment (never in the config), finds Claude Haiku 5.5's id in the Models
+ * API before anything else, and refuses to start without it. A dry run asks
+ * the model too: it is the model's answers that are being tried out.
+ *
+ * Exit codes: 0 done, 1 failed, 2 refused to start, 3 the total-loss stop fired.
  */
 
 import { readFileSync, realpathSync } from "node:fs";
@@ -21,11 +29,14 @@ import { createPublicClient, createWalletClient, http } from "viem";
 import type { PrivateKeyAccount } from "viem/accounts";
 import { bsc } from "viem/chains";
 
+import { Advisor } from "./advisor.js";
 import { CHAIN_ID, CONTRACTS, type Hex } from "./book.js";
 import { ConfigError, configDir, defaultConfig, parseConfig, type Config } from "./config.js";
 import { run } from "./engine.js";
+import { explainRecord, lastDecisions } from "./explain.js";
 import { ChainReader, FeastApi, RateLimiter, chainClientFrom, type ChainClient } from "./feast.js";
 import { Logger, errorText } from "./log.js";
+import { MODEL_NAME, ModelCallError, ModelNotFoundError, findModel, type ModelClient } from "./model.js";
 import { Risk } from "./risk.js";
 import { KeyError, loadKey } from "./secret.js";
 import { State, dryRunPath, type StateIo } from "./state.js";
@@ -43,6 +54,13 @@ export type CliDeps = {
   makeChainClient: (rpcUrl: string) => ChainClient;
   /** Builds the only thing that can send. Called for `--live` and never otherwise. */
   makeSender: (account: PrivateKeyAccount, rpcUrl: string) => Sender;
+  /**
+   * Builds the model's client from ANTHROPIC_API_KEY. Called only with
+   * `[llm_manager]` on. Default: Anthropic's library, loaded only then.
+   */
+  makeModelClient?: (apiKey: string) => Promise<ModelClient>;
+  /** How the total-loss stop creates the STOP file. Default: the real filesystem. */
+  writeFile?: (path: string, data: string) => void;
   fetch?: ConstructorParameters<typeof FeastApi>[0]["fetch"];
   loadKey?: typeof loadKey;
   stateIo?: StateIo;
@@ -55,10 +73,11 @@ export type CliDeps = {
 
 const USAGE = `feast-bot — a small trading bot for Feast pools on BNB Smart Chain
 
-  feast-bot run --config bot.toml [--once] [--live]
+  feast-bot run --config bot.toml [--once] [--live] [--new-session]
       Run the strategies the config turns on. Without --live this is a dry
       run: every order is quoted and printed, and nothing is sent.
-      --once runs a single pass and exits.
+      --once runs a single pass and exits. --new-session measures the
+      total-loss stop from where things stand now.
 
   feast-bot quote <poolId> <amount> [--side buy|sell] [--config bot.toml]
       Quote one trade the way the bot would place it: amount is BNB for a
@@ -68,8 +87,13 @@ const USAGE = `feast-bot — a small trading bot for Feast pools on BNB Smart Ch
   feast-bot pools [--limit 50] [--config bot.toml]
       List pools, newest first, with the pool ids the config asks for.
 
+  feast-bot explain [--config bot.toml] [--last 10]
+      Print the model's last decisions ([llm_manager]) in plain words, from
+      the log: what it decided for each coin, why, and what became of it.
+
 The key is read only for --live: from BOT_PRIVATE_KEY, or from the file
-[bot] key_file names. It is never printed, logged or written anywhere.`;
+[bot] key_file names. It is never printed, logged or written anywhere.
+[llm_manager] reads ANTHROPIC_API_KEY from the environment, the same way.`;
 
 export async function main(argv: string[], deps: CliDeps): Promise<number> {
   const [command, ...rest] = argv;
@@ -81,10 +105,11 @@ export async function main(argv: string[], deps: CliDeps): Promise<number> {
     if (command === "run") return await runCommand(rest, deps);
     if (command === "quote") return await quoteCommand(rest, deps);
     if (command === "pools") return await poolsCommand(rest, deps);
+    if (command === "explain") return explainCommand(rest, deps);
     deps.err(`unknown command ${JSON.stringify(command)}\n\n${USAGE}`);
     return 2;
   } catch (error) {
-    if (error instanceof ConfigError || error instanceof KeyError || error instanceof UsageError) {
+    if (error instanceof ConfigError || error instanceof KeyError || error instanceof UsageError || error instanceof ModelNotFoundError) {
       deps.err(error.message);
       return 2;
     }
@@ -138,6 +163,7 @@ async function runCommand(args: string[], deps: CliDeps): Promise<number> {
     config: { type: "string" },
     live: { type: "boolean", default: false },
     once: { type: "boolean", default: false },
+    "new-session": { type: "boolean", default: false },
   });
   const config = readConfig(values.config as string | undefined, deps, true);
   const live = values.live === true;
@@ -148,6 +174,18 @@ async function runCommand(args: string[], deps: CliDeps): Promise<number> {
   const rpc = new URL(config.bot.rpcUrl);
   if (rpc.pathname.length > 1) log.redact(rpc.pathname);
   if (rpc.search.length > 1) log.redact(rpc.search);
+
+  // The model's API key, from the environment only, and redacted before anything prints.
+  const llm = config.llmManager;
+  let modelKey: string | null = null;
+  if (llm.enabled) {
+    modelKey = (deps.env.ANTHROPIC_API_KEY ?? "").trim();
+    if (!modelKey) throw new UsageError("[llm_manager] needs ANTHROPIC_API_KEY in the environment (never in the config): export ANTHROPIC_API_KEY=… and run again");
+    log.redact(modelKey);
+    if (!live && !config.bot.wallet) {
+      throw new UsageError("[llm_manager] decides within your wallet's BNB, so a dry run needs [bot] wallet (your public address) to start from its balance");
+    }
+  }
 
   const client = await chainFor(config, deps);
 
@@ -161,10 +199,30 @@ async function runCommand(args: string[], deps: CliDeps): Promise<number> {
   }
 
   const state = State.load(live ? config.bot.stateFile : dryRunPath(config.bot.stateFile), deps.stateIo);
+  if (values["new-session"] === true && state.session()) {
+    state.endSession();
+    state.save();
+    log.info("session_reset", { note: "the total-loss stop is measured afresh from the first pass" });
+  }
   const risk = new Risk({ ...config.risk, stopFile: config.bot.stopFile }, { exists: deps.exists, now });
   const reader = new ChainReader(client);
   const api = new FeastApi({ base: config.bot.apiBase, limiter: new RateLimiter(config.bot.apiRequestsPerMinute, now, deps.sleep), fetch: deps.fetch });
   const trader = new Trader({ reader, risk, log, wallet, sender, referrer: config.bot.referrer, maxSlippageBps: config.risk.maxSlippageBps });
+
+  // THE MODEL IS FOUND, NOT ASSUMED: its id comes from the Models API, or the bot does not start.
+  let advisor: Advisor | null = null;
+  if (llm.enabled && modelKey) {
+    const modelClient = await (deps.makeModelClient ?? defaultModelClient)(modelKey);
+    let model: { id: string; displayName: string };
+    try {
+      model = await findModel(modelClient);
+    } catch (error) {
+      if (error instanceof ModelCallError) throw new UsageError(`could not list the models this ANTHROPIC_API_KEY may use (${error.kind}: ${error.message})`);
+      throw error;
+    }
+    log.info("model", { strategy: "llm_manager", wanted: MODEL_NAME, id: model.id, displayName: model.displayName });
+    advisor = new Advisor({ settings: llm, maxTotalLossWei: config.risk.maxTotalLossWei, client: modelClient, model: model.id, api, reader, trader, log, now });
+  }
 
   log.info("start", {
     mode: live ? "live" : "dry-run",
@@ -175,6 +233,7 @@ async function runCommand(args: string[], deps: CliDeps): Promise<number> {
     strategies: {
       mean_reversion: config.meanReversion.enabled ? config.meanReversion.pools.length : "off",
       launch_momentum: config.launchMomentum.enabled ? "on" : "off",
+      llm_manager: llm.enabled ? llm.coins.length : "off",
     },
     limits: {
       maxPositionBnb: formatAmount(config.risk.maxPositionWei),
@@ -182,12 +241,46 @@ async function runCommand(args: string[], deps: CliDeps): Promise<number> {
       maxSlippageBps: config.risk.maxSlippageBps,
       minCooldownSeconds: config.risk.minCooldownSeconds,
       maxOrdersPerHour: config.risk.maxOrdersPerHour,
+      maxTotalLossBnb: config.risk.maxTotalLossWei > 0n ? formatAmount(config.risk.maxTotalLossWei) : "off",
+      ...(llm.enabled && config.risk.onlyTotalLoss
+        ? { llmManager: "the model's orders answer to the total-loss stop and the STOP file only; every other limit above is off for them" }
+        : {}),
     },
     stopFile: config.bot.stopFile,
   });
 
-  await run({ config, api, reader, trader, risk, state, log, now }, { once: values.once === true, signal: deps.signal, sleep: deps.sleep });
+  const ended = await run(
+    { config, api, reader, trader, risk, state, log, now, advisor, writeFile: deps.writeFile },
+    { once: values.once === true, signal: deps.signal, sleep: deps.sleep },
+  );
+  // The total-loss stop's own line is the last one: no exit line after it.
+  if (ended === "halted") return 3;
   log.info("exit", { mode: live ? "live" : "dry-run" });
+  return 0;
+}
+
+async function defaultModelClient(apiKey: string): Promise<ModelClient> {
+  const { anthropicClient } = await import("./anthropic.js");
+  return anthropicClient(apiKey);
+}
+
+function explainCommand(args: string[], deps: CliDeps): number {
+  const { values } = parse(args, { config: { type: "string" }, last: { type: "string", default: "10" } });
+  const count = Number(values.last);
+  if (!Number.isInteger(count) || count < 1 || count > 1000) throw new UsageError("--last is a whole number from 1 to 1000");
+  const config = readConfig(values.config as string | undefined, deps, false);
+  let text: string;
+  try {
+    text = deps.readFile(config.bot.logFile);
+  } catch {
+    throw new UsageError(`cannot read the log ${config.bot.logFile}; run the bot first, or pass --config`);
+  }
+  const records = lastDecisions(text, count);
+  if (records.length === 0) {
+    deps.out(`no decisions in ${config.bot.logFile} yet: [llm_manager] writes one each time it asks the model`);
+    return 0;
+  }
+  for (const record of records) for (const line of explainRecord(record)) deps.out(line);
   return 0;
 }
 

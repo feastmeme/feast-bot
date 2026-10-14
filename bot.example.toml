@@ -38,6 +38,14 @@ max_slippage_bps = 300
 min_cooldown_seconds = 300
 max_orders_per_hour = 6
 gas_reserve_bnb = "0.005"
+# The total-loss stop: once the session is this many BNB down (closed and
+# open results together), the bot sells nothing, creates the stop file and
+# exits. "0" is off; [llm_manager] will not start without it.
+max_total_loss_bnb = "0"
+# With [llm_manager] on, the model's orders answer to the total-loss stop and
+# the stop file alone: every limit above is off for them. Set this to false
+# to hold the model's orders to every limit above as well.
+only_total_loss = true
 
 # Turn on one strategy to start with.
 
@@ -60,3 +68,15 @@ min_trades_per_min = 1
 order_bnb = "0.005"
 trailing_stop_pct = 20
 time_stop_min = 120
+
+# A language model (Claude Haiku 5.5) decides for the coins you list, from
+# numbers alone. Needs ANTHROPIC_API_KEY in the environment (never here),
+# [bot] wallet, and [risk] max_total_loss_bnb above zero. Read README.md first.
+[llm_manager]
+enabled = false
+# Coin addresses or pool ids from `npx feast-bot pools`, like
+# coins = ["0x<coin address>", "0x<pool id>"]
+coins = []
+poll_minutes = 10
+event_trade_bnb = "0.05"
+event_new_pool_minutes = 30

@@ -126,6 +126,48 @@ pools = ["0x1234"]
     ]);
   });
 
+  it("checks [llm_manager] like every section: by name, by type and bound, with unknown keys refused", () => {
+    const coin = "0x96b1188367ed76d1a81d46407e226462314cfeed";
+    const poolId = "0xa83f080ba2091ac3c25815389abd40ef85c9ef2cf1393bcdcb7867cd76d5e278";
+    const config = parseConfig(`[risk]\nmax_total_loss_bnb = "0.2"\n[llm_manager]\nenabled = true\ncoins = ["${coin.toUpperCase().replace("0X", "0x")}", "${poolId}", "${coin}"]\npoll_minutes = 15\nevent_trade_bnb = "0.1"\nevent_new_pool_minutes = 0`, BASE);
+    expect(config.llmManager).toEqual({ enabled: true, coins: [coin, poolId], pollMinutes: 15, eventTradeWei: 10n ** 17n, eventNewPoolMinutes: 0 });
+    expect(config.risk).toMatchObject({ maxTotalLossWei: 2n * 10n ** 17n, onlyTotalLoss: true });
+    expect(parseConfig("", BASE).llmManager).toEqual({ enabled: false, coins: [], pollMinutes: 10, eventTradeWei: 5n * 10n ** 16n, eventNewPoolMinutes: 30 });
+    expect(parseConfig("", BASE).risk).toMatchObject({ maxTotalLossWei: 0n, onlyTotalLoss: true });
+
+    expect(problemsOf(`[llm_manager]\npoll_minute = 10`)).toEqual(["unknown setting [llm_manager] poll_minute"]);
+    expect(problemsOf(`[risk]\nonly_total_los = false`)).toEqual(["unknown setting [risk] only_total_los"]);
+    expect(
+      problemsOf(`[risk]\nonly_total_loss = "no"\nmax_total_loss_bnb = "-1"\n[llm_manager]\npoll_minutes = 4\nevent_trade_bnb = "0"\nevent_new_pool_minutes = 1441\ncoins = ["0x1234"]`),
+    ).toEqual([
+      "[risk] only_total_loss must be true or false",
+      '[risk] max_total_loss_bnb must be a plain decimal amount of BNB, like "0.01"',
+      "[llm_manager] poll_minutes must be at least 5",
+      "[llm_manager] event_trade_bnb must be more than zero",
+      "[llm_manager] event_new_pool_minutes must be at most 1440",
+      "[llm_manager] coins must hold coin addresses (0x and 40 hex digits) or pool ids (0x and 64), as feast-bot pools prints them",
+    ]);
+    expect(problemsOf(`[llm_manager]\npoll_minutes = 61`)).toEqual(["[llm_manager] poll_minutes must be at most 60"]);
+    const many = Array.from({ length: 11 }, (_, i) => `"0x${(i + 1).toString(16).padStart(40, "0")}"`).join(", ");
+    expect(problemsOf(`[llm_manager]\ncoins = [${many}]`)).toEqual(["[llm_manager] coins may list at most 10 coins"]);
+  });
+
+  it("refuses [llm_manager] without coins, or without a total-loss stop, and an API key in the config", () => {
+    expect(problemsOf(`[risk]\nmax_total_loss_bnb = "0.1"\n[llm_manager]\nenabled = true`)).toEqual([
+      "[llm_manager] is enabled but lists no coins; add coin addresses or pool ids (feast-bot pools prints both)",
+    ]);
+    expect(problemsOf(`[llm_manager]\nenabled = true\ncoins = ["0x96b1188367ed76d1a81d46407e226462314cfeed"]`)).toEqual([
+      "[llm_manager] is enabled but [risk] max_total_loss_bnb is 0; the total-loss stop is the model's only limit, so set how much BNB the session may lose",
+    ]);
+    const key = `sk-ant-api03-${"q".repeat(40)}`;
+    const problems = problemsOf(`[llm_manager]\napi_key = "${key}"\n[anthropic_key]\nx = 1`);
+    expect(problems).toHaveLength(2);
+    for (const problem of problems) {
+      expect(problem).toMatch(/never put a private key/);
+      expect(problem).not.toContain(key);
+    }
+  });
+
   it("allows plain http only for a local API or RPC", () => {
     const config = parseConfig(`[bot]\napi_base = "http://localhost:3000/"\nrpc_url = "http://127.0.0.1:8545"`, BASE);
     expect(config.bot.apiBase).toBe("http://localhost:3000");

@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 
+import type { ModelDecision } from "../src/model.js";
 import { decideLaunchEntry, decideLaunchExit, tradesPerMinute, type LaunchMomentumSettings } from "../src/strategies/launchMomentum.js";
+import { decideLlmManager } from "../src/strategies/llmManager.js";
 import { decideMeanReversion, vwap, type MeanReversionSettings } from "../src/strategies/meanReversion.js";
 import type { Candle, Position } from "../src/strategies/types.js";
 import { BNB_POOL, ROUTED_POOL, sqrtFor } from "./fixtures.js";
@@ -174,5 +176,68 @@ describe("launch momentum", () => {
 
   it("leaves a mean-reversion position alone", () => {
     expect(decideLaunchExit({ settings: lm, position: position(), valueWei: 0n, now: NOW }).intent).toBeNull();
+  });
+});
+
+describe("llm manager: the model's answer, as intents", () => {
+  const coins = new Map([
+    [BNB_POOL.coin, { coin: BNB_POOL.coin, poolId: BNB_POOL.poolId }],
+    [ROUTED_POOL.coin, { coin: ROUTED_POOL.coin, poolId: ROUTED_POOL.poolId }],
+  ]);
+  const decision = (overrides: Partial<ModelDecision>): ModelDecision => ({
+    coin: BNB_POOL.coin,
+    action: "hold",
+    amountBnb: "0",
+    amountWei: 0n,
+    fraction: 0,
+    reason: "because",
+    ...overrides,
+  });
+  const held = position({ strategy: "llm_manager", coins: 1000n * BNB });
+
+  it("buys what the model said, sells the share it said, holds the rest, and carries its reasons", () => {
+    const { intents, skipped } = decideLlmManager({
+      decisions: [
+        decision({ action: "buy", amountBnb: "0.02", amountWei: BNB / 50n, reason: "entry" }),
+        decision({ coin: ROUTED_POOL.coin, action: "sell", fraction: 0.25, reason: "trim" }),
+      ],
+      coins,
+      position: (coin) => (coin === ROUTED_POOL.coin ? { ...held, coin: ROUTED_POOL.coin, poolId: ROUTED_POOL.poolId } : null),
+      balanceWei: BNB,
+    });
+    expect(intents).toEqual([
+      { side: "buy", strategy: "llm_manager", poolId: BNB_POOL.poolId, coin: BNB_POOL.coin, amountWei: BNB / 50n, reason: "entry" },
+      { side: "sell", strategy: "llm_manager", poolId: ROUTED_POOL.poolId, coin: ROUTED_POOL.coin, coins: 250n * BNB, reason: "trim" },
+    ]);
+    expect(skipped).toEqual([]);
+  });
+
+  it("a fraction of 1 sells the whole position, to the last unit", () => {
+    const odd = { ...held, coins: 1000n * BNB + 7n };
+    const { intents } = decideLlmManager({ decisions: [decision({ action: "sell", fraction: 1 })], coins, position: () => odd, balanceWei: BNB });
+    expect(intents[0]).toMatchObject({ side: "sell", coins: 1000n * BNB + 7n });
+  });
+
+  it("refuses, and says why: more than the wallet can spend, nothing to sell, another strategy's position, a coin not found", () => {
+    const { intents, skipped } = decideLlmManager({
+      decisions: [
+        decision({ action: "buy", amountWei: BNB / 2n }),
+        decision({ action: "buy", amountWei: BNB / 2n + 1n }),
+        decision({ coin: ROUTED_POOL.coin, action: "sell", fraction: 0.5 }),
+      ],
+      coins,
+      position: () => null,
+      balanceWei: BNB,
+    });
+    // The first buy fits; the second does not fit beside it.
+    expect(intents).toHaveLength(1);
+    expect(skipped).toEqual([
+      { coin: BNB_POOL.coin, action: "buy", why: "more BNB than the wallet can spend" },
+      { coin: ROUTED_POOL.coin, action: "sell", why: "nothing held to sell" },
+    ]);
+    const theirs = decideLlmManager({ decisions: [decision({ action: "sell", fraction: 1 })], coins, position: () => position(), balanceWei: BNB });
+    expect(theirs.skipped).toEqual([{ coin: BNB_POOL.coin, action: "sell", why: "the position belongs to mean_reversion" }]);
+    const lost = decideLlmManager({ decisions: [decision({ action: "buy", amountWei: 1n })], coins: new Map(), position: () => null, balanceWei: BNB });
+    expect(lost.skipped).toEqual([{ coin: BNB_POOL.coin, action: "buy", why: "the coin's pool has not been found" }]);
   });
 });

@@ -10,7 +10,7 @@
  * become wei and a float cannot hold every wei amount exactly.
  */
 
-export type FieldKind = "bool" | "int" | "number" | "bnb" | "url" | "address" | "path" | "poolIds";
+export type FieldKind = "bool" | "int" | "number" | "bnb" | "url" | "address" | "path" | "poolIds" | "coins";
 
 export type Field = {
   readonly kind: FieldKind;
@@ -20,6 +20,8 @@ export type Field = {
   readonly max?: number;
   /** For `bnb`: refuse zero. */
   readonly positive?: boolean;
+  /** For `coins`: the most entries the list may hold. */
+  readonly maxItems?: number;
   /** For `address`, `path`: an empty string means "not set". */
   readonly optional?: boolean;
 };
@@ -44,6 +46,10 @@ export const SCHEMA = {
     min_cooldown_seconds: { kind: "int", default: 300, min: 0, max: 86400 },
     max_orders_per_hour: { kind: "int", default: 6, min: 1, max: 60 },
     gas_reserve_bnb: { kind: "bnb", default: "0.005" },
+    // The session's total-loss stop: "0" is off. [llm_manager] refuses to start without it.
+    max_total_loss_bnb: { kind: "bnb", default: "0" },
+    // With [llm_manager] on, the model's orders answer to the total-loss stop (and STOP) alone.
+    only_total_loss: { kind: "bool", default: true },
   },
   mean_reversion: {
     enabled: { kind: "bool", default: false },
@@ -62,6 +68,14 @@ export const SCHEMA = {
     order_bnb: { kind: "bnb", default: "0.005", positive: true },
     trailing_stop_pct: { kind: "number", default: 20, min: 1, max: 99 },
     time_stop_min: { kind: "int", default: 120, min: 1, max: 10080 },
+  },
+  llm_manager: {
+    enabled: { kind: "bool", default: false },
+    // Ten keeps one read a coin each pass, and a decision's reads, inside the API's limit.
+    coins: { kind: "coins", default: [], maxItems: 10 },
+    poll_minutes: { kind: "int", default: 10, min: 5, max: 60 },
+    event_trade_bnb: { kind: "bnb", default: "0.05", positive: true },
+    event_new_pool_minutes: { kind: "int", default: 30, min: 0, max: 1440 },
   },
 } as const satisfies Record<string, Record<string, Field>>;
 

@@ -15,6 +15,9 @@
  *
  * The rules, in the order they are checked:
  *   stop_file            a file named `[bot] stop_file` exists: no orders at all
+ *   max_total_loss       (buys) the session is `max_total_loss_bnb` down; the
+ *                        engine stops the bot at that point too, so this is the
+ *                        second line, not the first
  *   max_orders_per_hour  (buys) orders in the last 60 minutes, buys and sales together
  *   min_cooldown         (buys) seconds since the last order on the same coin
  *   max_slippage         (buys) the expected slippage against the pool's price
@@ -29,6 +32,13 @@
  * began with a buy that passed every rule — and each still carries its floor,
  * `max_slippage_bps` below the quote, so the chain reverts one the price ran
  * away from between quote and block.
+ *
+ * THE MODEL'S ORDERS (`llm_manager`) answer to the stop file and the
+ * total-loss stop ALONE while `[risk] only_total_loss` is true, which is its
+ * default: that is the owner's design for the strategy, and the README puts
+ * it in a warning of its own. Every other strategy keeps every rule. A model's buy with no
+ * session to measure against is refused outright. Its transactions still carry
+ * the floor `max_slippage_bps` below the quote: that is the trader's, not a rule.
  */
 
 import { existsSync } from "node:fs";
@@ -39,6 +49,7 @@ import { formatAmount } from "./units.js";
 
 export type RiskRule =
   | "stop_file"
+  | "max_total_loss"
   | "max_orders_per_hour"
   | "min_cooldown"
   | "max_slippage"
@@ -59,6 +70,8 @@ export type RiskView = {
   openLossWei: bigint;
   /** The wallet's BNB balance when known (live), else null. */
   balanceWei: bigint | null;
+  /** How far the session is down, wei (negative when up); null or absent without a session. */
+  sessionLossWei?: bigint | null;
 };
 
 export type Approval = { readonly id: number; readonly planId: string };
@@ -96,6 +109,15 @@ export class Risk {
     const limits = this.limits;
     if (this.stopped()) return refuse("stop_file", `${limits.stopFile} exists; delete it to allow orders again`);
     if (plan.side === "sell") return this.approve(plan);
+
+    const sessionLoss = view.sessionLossWei ?? null;
+    if (limits.maxTotalLossWei > 0n && sessionLoss !== null && sessionLoss >= limits.maxTotalLossWei) {
+      return refuse("max_total_loss", `the session is ${formatAmount(sessionLoss)} BNB down (limit ${formatAmount(limits.maxTotalLossWei)})`);
+    }
+    if (plan.strategy === "llm_manager" && limits.onlyTotalLoss) {
+      if (sessionLoss === null || limits.maxTotalLossWei === 0n) return refuse("max_total_loss", "no session to measure the total-loss stop against");
+      return this.approve(plan);
+    }
 
     const lastHour = view.ordersSince(view.now - 3_600_000);
     if (lastHour >= limits.maxOrdersPerHour) {

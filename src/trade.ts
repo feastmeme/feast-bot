@@ -296,6 +296,23 @@ export class Trader {
   }
 
   /**
+   * What `amount` of a quote asset would sell for in BNB now, in wei, through
+   * the same hops a sale takes; the amount itself for wrapped BNB. Null when it
+   * cannot be quoted. It turns a pool's quote-asset figures into BNB.
+   */
+  async bnbValueOf(quoteAsset: Hex, amount: bigint): Promise<bigint | null> {
+    if (amount <= 0n) return 0n;
+    const route = routeFor(quoteAsset);
+    if (!route) return null;
+    if (route.sell.length === 0) return amount;
+    try {
+      return await this.mixed(hopsQuoteArgs(quoteAsset, route.sell, amount), this.deps.wallet);
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * Carry out an approved plan. In a dry run: log it and return a paper fill.
    * Live: send each step, wait for each receipt, and measure the fill from
    * balances.

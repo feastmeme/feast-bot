@@ -6,11 +6,15 @@
  * sees the trader, the wallet or the risk module, so it cannot send anything
  * and cannot skip a limit: every intent goes through `risk.ts` before it can
  * become a transaction.
+ *
+ * `llm_manager` is no exception: the language model is asked by the advisor
+ * (`advisor.ts`), which the engine runs before the strategies, and the strategy
+ * only turns the model's checked answer into intents.
  */
 
 import type { Hex } from "../book.js";
 
-export type StrategyName = "mean_reversion" | "launch_momentum";
+export type StrategyName = "mean_reversion" | "launch_momentum" | "llm_manager";
 
 export type Intent =
   | { side: "buy"; strategy: StrategyName; poolId: Hex; coin: Hex; amountWei: bigint; reason: string }

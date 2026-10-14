@@ -2,8 +2,9 @@
 
 A small program that trades Feast pools on BNB Smart Chain from your own
 computer, with your own wallet and your own limits. It reads Feast's public
-API and the chain, decides with one of two simple strategies, and checks every
-order against a set of limits before anything happens.
+API and the chain, decides with one of two simple rule strategies — or lets a
+language model decide for coins you list — and checks every order against
+the limits before anything happens.
 
 **It sends nothing until you add `--live`.** Without it, every order is quoted
 and printed — the transaction data, the quote and the expected slippage — and
@@ -80,7 +81,9 @@ while the process keeps running; delete it to allow orders again.
 ## How an order is made
 
 1. A **strategy** looks at the numbers and proposes an order. It cannot send
-   anything: it never sees the wallet, the trader or the limits.
+   anything: it never sees the wallet, the trader or the limits. (With
+   `[llm_manager]`, a step before the strategies asks the model; the strategy
+   only turns its answer into orders.)
 2. The **trader** quotes the order on chain, exactly as the Feast site does:
    the venue's own quoter simulates the same pools the router will swap
    (between BNB and the pool's quote asset, then the Feast pool and its hook),
@@ -98,7 +101,7 @@ A buy is one transaction. The first sale of a coin also needs a one-time
 approval transaction and a signature that lets the router move that coin for
 thirty days; both happen automatically, live, and are shown in a dry run.
 
-## The two strategies
+## The strategies
 
 **Mean reversion** (`[mean_reversion]`). For each pool you list, the bot
 averages the pool's price over the last `window_min` minutes, weighted by
@@ -118,6 +121,105 @@ In a pool's first two blocks with trades, the hook refuses any buy over the
 per-wallet cap (`PurchaseCapExceeded`). The bot logs the refusal by name and
 tries again on a later pass.
 
+**The model** (`[llm_manager]`). A language model, Claude Haiku 5.5, decides
+for the coins you list — and only those. It has its own section below.
+
+## The model strategy (`[llm_manager]`)
+
+Every `poll_minutes` (10 by default) the bot puts together a packet of
+numbers about each coin in `coins` and about your book, asks Claude Haiku 5.5
+once, and acts on its answer: for each coin, buy (an amount of BNB), sell (a
+share of the position) or hold, with a reason of at most 200 characters.
+
+**The model sees numbers only.** Per coin: the price now and its change over
+1, 5, 15 and 60 minutes (from the API's one-minute candles), volume over the
+same windows, trades a minute, buys and sales, unique buyers and the buy/sell
+ratio over 15 and 60 minutes, holders and their change, the pool's age, the
+opening cap, and — when the API gives them as numbers — the holders and trade
+counts of the creator's earlier coins. Per book: the position, its cost and
+what it would sell for now, results closed and open, the BNB you can spend,
+the session's loss budget left, and time since the last order. No coin name,
+no symbol, no description, no link, nothing anyone wrote: every field is
+picked by name, and the only strings the packet may hold are hex addresses
+and ids, and timestamps (UTC, like `2026-10-14T08:00:00.000Z`). The bot
+checks the whole packet for exactly that before every call, and refuses to
+send one that fails.
+
+**The model is found, never assumed.** At start the bot reads the models your
+key may use from Anthropic's Models API and takes the one named Claude Haiku
+5.5. Without it, the bot names the Haiku models it did find and does not
+start.
+
+**Its answer is checked.** The API holds the model to a JSON schema; the bot
+checks it again — every field, the reason's length, the share's range, each
+coin at most once and none you did not list. An answer that fails any check,
+a refusal, a timeout or any API error means no order this time, and a line in
+the log that says why. A coin the answer leaves out is held.
+
+**Events bring a decision forward**, for the listed coins only: a single trade
+worth more than `event_trade_bnb`, or a pool younger than
+`event_new_pool_minutes`. Never sooner than five minutes after the last.
+
+> **Warning: one stop, and nothing else.** With `[llm_manager]` on, the
+> model's orders answer to `[risk] max_total_loss_bnb` and the stop file
+> alone. `max_position_bnb`, `daily_loss_cap_bnb`, `max_slippage_bps`,
+> `min_cooldown_seconds`, `max_orders_per_hour` and `gas_reserve_bnb` do not
+> apply to them. The model sizes its orders freely within the BNB the wallet
+> holds. Set `[risk] only_total_loss = false` to hold its orders to every
+> limit as well. (The rule strategies keep every limit either way, and every
+> transaction still carries its floor `max_slippage_bps` below the quote.)
+
+**The total-loss stop** (`[risk] max_total_loss_bnb`). The session begins on
+the first pass, from your wallet's balance plus what any open positions
+would sell for. Its BNB is then kept by the book, from the bot's own fills,
+gas included, so BNB you add to or take from the wallet is neither a loss
+nor a gain. When equity — that BNB plus what every position would sell for
+now — falls `max_total_loss_bnb` below where the session began, the bot
+**sells nothing**, creates the stop file, writes a final log line
+(`total_loss_stop`) and exits with code 3. The session lives in the state
+file, so a restart does not reset it: the stop fires again at once. To trade
+again, delete the stop file and run with `--new-session`, which measures from
+where things stand then. The stop applies to every strategy whenever it is
+set above zero. A position is valued again right after each fill, so within
+one decision the stop sees what the last order's fees and price impact took
+before the next order goes. One case errs toward stopping: a transaction
+whose receipt never came is booked as the limits section below describes,
+and if it never landed, the book counts a loss the wallet did not take —
+the stop can then fire early. Check the wallet before `--new-session`.
+
+**Cost.** Each decision is one call: about 4,000 tokens in for five coins,
+plus the fixed instructions, which are cached and read back at a tenth of
+the price, and a few hundred to a couple of thousand tokens out, most of them
+the model's own reasoning. At one decision every ten minutes that comes to
+between about fifteen and forty US cents a day at Anthropic's published
+rates for Claude Haiku 5.5 (0.10 US dollars per million tokens in, 0.50
+out). Events that bring decisions forward add to it. Each decision's tokens
+are in the log (`usage`), so the real figure is there to read.
+
+**What you do, in three steps:**
+
+1. **Your Anthropic API key, in the environment.** `export
+   ANTHROPIC_API_KEY=…` in the shell that runs the bot. Never in `bot.toml`:
+   the bot refuses a key-like setting there, reads the key only from the
+   environment, and never prints it. It sends the key, and the packets, to
+   `https://api.anthropic.com` alone: an `ANTHROPIC_BASE_URL` or
+   `ANTHROPIC_AUTH_TOKEN` your shell may have for other tools is ignored.
+2. **One wallet.** In `bot.toml`: `[bot] wallet` set to your address, your
+   coins listed under `[llm_manager] coins`, `[risk] max_total_loss_bnb` set
+   to what this session may lose, and `[llm_manager] enabled = true`. Then
+   watch a dry run — it asks the model too, so you see its decisions:
+
+   ```sh
+   npx feast-bot run --config bot.toml
+   npx feast-bot explain --config bot.toml
+   ```
+
+3. **Go live** with the key file or `BOT_PRIVATE_KEY`, as in the quickstart:
+
+   ```sh
+   npx feast-bot run --config bot.toml --live
+   ```
+
 ## Limits
 
 Checked in this order:
@@ -125,12 +227,16 @@ Checked in this order:
 | Limit | Applies to | Blocks an order when |
 | --- | --- | --- |
 | stop file | every order | the file named by `stop_file` exists |
+| `max_total_loss_bnb` | buys, when above zero | the session is that far down (the bot also stops itself there) |
 | `max_orders_per_hour` | buys | that many orders (buys and sales) went out in the last 60 minutes |
 | `min_cooldown_seconds` | buys | the last order on the same coin was more recent |
 | `max_slippage_bps` | buys | the expected slippage is larger, or cannot be measured |
 | `max_position_bnb` | buys | the coin's position would cost more than this |
 | `daily_loss_cap_bnb` | buys | today's realized result plus open positions' paper loss is this far down (UTC day) |
 | `gas_reserve_bnb` | buys, live | the order would leave less BNB than this for gas |
+
+The model's buys answer to the first two rows alone while `only_total_loss`
+is true: see the warning above.
 
 A sale is held to the stop file alone. It closes a position the bot already
 holds, so no limit may trap it there: a stop that fires into a thin pool, or in
@@ -175,6 +281,8 @@ so a typo cannot leave a limit at its default.
 | `min_cooldown_seconds` | `300` | Least time between an order on a coin and the next buy of it. |
 | `max_orders_per_hour` | `6` | Most orders in any 60 minutes; once reached, buys wait and sales still go. |
 | `gas_reserve_bnb` | `"0.005"` | BNB a live buy always leaves in the wallet for gas. |
+| `max_total_loss_bnb` | `"0"` | The total-loss stop: the session may fall this far, then the bot sells nothing, creates the stop file and exits. `"0"` is off; `[llm_manager]` needs it above zero. |
+| `only_total_loss` | `true` | With `[llm_manager]` on, the model's orders answer to the total-loss stop and the stop file alone. `false` holds them to every limit. |
 
 ### `[mean_reversion]`
 
@@ -200,16 +308,32 @@ so a typo cannot leave a limit at its default.
 | `trailing_stop_pct` | `20` | Sell when the position's value falls this far below its highest. |
 | `time_stop_min` | `120` | Sell after this many minutes, whatever happens. |
 
+### `[llm_manager]`
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| `enabled` | `false` | Turns the model strategy on. Needs `ANTHROPIC_API_KEY`, `[bot] wallet` and `[risk] max_total_loss_bnb`. |
+| `coins` | `[]` | The coins the model decides for, and the only ones: coin addresses or pool ids (`feast-bot pools` prints both), at most 10. |
+| `poll_minutes` | `10` | Minutes between decisions (5 to 60). |
+| `event_trade_bnb` | `"0.05"` | A single trade in a listed coin worth more than this brings the next decision forward. |
+| `event_new_pool_minutes` | `30` | While a listed coin's pool is younger than this, a decision comes every five minutes. `0` is off. |
+
 Amounts in BNB are written as quoted decimals (`"0.01"`), so no amount is ever
 rounded on its way to wei.
 
 ## Commands
 
 ```
-feast-bot run --config bot.toml [--once] [--live]
+feast-bot run --config bot.toml [--once] [--live] [--new-session]
 feast-bot quote <pool id> <amount> [--side buy|sell] [--config bot.toml]
 feast-bot pools [--limit 50] [--config bot.toml]
+feast-bot explain [--config bot.toml] [--last 10]
 ```
+
+`explain` prints the model's last decisions in plain words, from the log:
+what it decided for each coin, its reason, and what became of the order.
+`run` exits with 0 when done, 2 when it refuses to start, 1 on a failure,
+and 3 when the total-loss stop fired.
 
 ## Logs
 
@@ -219,6 +343,13 @@ you will see most: `start`, `tick`, `checked`, `signal`, `order`,
 `order_blocked` (with the `rule` that blocked it), `order_refused_by_chain`
 (with the contract's own error name), `tx_sent`, `tx_confirmed`, `filled`,
 `closed`.
+
+With a total-loss stop: `session_start`, and `total_loss_stop` as the last
+line. With `[llm_manager]`: `model` (the id found at start), and one
+`decision` per decision — the packet's hash, the model, the whole answer with
+its reasons (or the `refusal` that stopped it), each order the answer led to
+with whether the risk gate let it through (`approved`) and what became of it,
+and the tokens it cost (`usage`).
 
 ## Rules for bots
 
@@ -237,7 +368,9 @@ you will see most: `start`, `tick`, `checked`, `signal`, `order`,
   API asks it to.
 - **Your key stays on your machine.** The bot reads it only with `--live`,
   keeps it in memory, and never logs, writes or sends it. Feast never asks for
-  your key, and nobody from Feast will.
+  your key, and nobody from Feast will. The same holds for your Anthropic API
+  key: read from `ANTHROPIC_API_KEY`, sent only to Anthropic's API, never
+  printed.
 
 ## What this kit does not do
 
@@ -260,3 +393,10 @@ because the test runner's bundler does.
 `test/parity.test.ts` compares this kit with the Feast app's own trade helpers
 and address book when the folder sits inside the Feast repository, and skips
 itself anywhere else.
+
+No test calls Anthropic's API: the model is a fake that answers in the API's
+own response shape. Anthropic's library is loaded only by `src/anthropic.ts`,
+and only when `run` has `[llm_manager]` on. Inside the Feast repository the
+app's typecheck also compiles this folder without the kit's own install;
+the two imports of that library are marked so that check passes, and
+`npm run typecheck` here checks them in full.

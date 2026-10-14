@@ -129,6 +129,41 @@ describe("each cap blocks an order on its own", () => {
   });
 });
 
+describe("the total-loss stop, and the model's orders", () => {
+  const capped = { ...limits, maxTotalLossWei: BNB / 10n };
+  const gate = (overrides: Partial<typeof capped> = {}) => new Risk({ ...capped, ...overrides }, { exists: () => false, now: () => NOW });
+
+  it("blocks every strategy's buys once the session is max_total_loss_bnb down, and no sale", () => {
+    expect(gate().check(plan(), view({ sessionLossWei: BNB / 10n - 1n })).ok).toBe(true);
+    expect(gate().check(plan(), view({ sessionLossWei: BNB / 10n }))).toMatchObject({ ok: false, rule: "max_total_loss" });
+    expect(gate().check(plan({ strategy: "llm_manager" }), view({ sessionLossWei: BNB }))).toMatchObject({ ok: false, rule: "max_total_loss" });
+    expect(gate().check(plan({ side: "sell" }), view({ sessionLossWei: BNB })).ok).toBe(true);
+    // Off at zero.
+    expect(gate({ maxTotalLossWei: 0n }).check(plan(), view({ sessionLossWei: BNB })).ok).toBe(true);
+  });
+
+  it("lets the model's buys past every other rule while only_total_loss is on", () => {
+    const outside = view({ sessionLossWei: 0n, ordersSince: () => 99, lastOrderAt: () => NOW, positionCostWei: () => 10n * BNB, openLossWei: 10n * BNB, balanceWei: 0n });
+    const llm = plan({ strategy: "llm_manager", impact: 0.5 });
+    expect(gate().check(llm, outside).ok).toBe(true);
+    expect(gate().check({ ...llm, impact: null }, outside).ok).toBe(true);
+    // Not other strategies' buys.
+    expect(gate().check(plan({ impact: 0.5 }), outside)).toMatchObject({ ok: false, rule: "max_orders_per_hour" });
+    // Not with only_total_loss off.
+    expect(gate({ onlyTotalLoss: false }).check(llm, outside)).toMatchObject({ ok: false, rule: "max_orders_per_hour" });
+  });
+
+  it("refuses the model's buys with no session to measure against, or no stop at all", () => {
+    expect(gate().check(plan({ strategy: "llm_manager" }), view())).toMatchObject({ ok: false, rule: "max_total_loss", reason: "no session to measure the total-loss stop against" });
+    expect(gate({ maxTotalLossWei: 0n }).check(plan({ strategy: "llm_manager" }), view({ sessionLossWei: 0n }))).toMatchObject({ ok: false, rule: "max_total_loss" });
+  });
+
+  it("still holds the model's orders to the STOP file", () => {
+    const stopped = new Risk(capped, { exists: () => true, now: () => NOW });
+    expect(stopped.check(plan({ strategy: "llm_manager" }), view({ sessionLossWei: 0n }))).toMatchObject({ ok: false, rule: "stop_file" });
+  });
+});
+
 describe("an approval cannot be forged, reused, kept, or spent after STOP", () => {
   it("refuses an object that only looks like an approval", () => {
     const forged: Approval = Object.freeze({ id: 1, planId: "p1" });

@@ -36,6 +36,10 @@ export type Config = {
     minCooldownSeconds: number;
     maxOrdersPerHour: number;
     gasReserveWei: bigint;
+    /** The session's total-loss stop, wei; 0 is off. */
+    maxTotalLossWei: bigint;
+    /** With [llm_manager] on: the model's orders answer to the total-loss stop and STOP alone. */
+    onlyTotalLoss: boolean;
   };
   meanReversion: {
     enabled: boolean;
@@ -54,6 +58,14 @@ export type Config = {
     orderWei: bigint;
     trailingStopPct: number;
     timeStopMin: number;
+  };
+  llmManager: {
+    enabled: boolean;
+    /** Coin addresses (40 hex digits) or pool ids (64), as the config lists them, lowercased. */
+    coins: Hex[];
+    pollMinutes: number;
+    eventTradeWei: bigint;
+    eventNewPoolMinutes: number;
   };
 };
 
@@ -82,7 +94,7 @@ export function parseConfig(source: string, baseDir: string): Config {
   }
 
   const problems: string[] = [];
-  const values: Record<SectionName, Raw> = { bot: {}, risk: {}, mean_reversion: {}, launch_momentum: {} };
+  const values: Record<SectionName, Raw> = { bot: {}, risk: {}, mean_reversion: {}, launch_momentum: {}, llm_manager: {} };
 
   for (const [name, section] of Object.entries(table)) {
     if (!SECTION_NAMES.includes(name as SectionName)) {
@@ -124,6 +136,7 @@ export function parseConfig(source: string, baseDir: string): Config {
   const risk = values.risk;
   const mr = values.mean_reversion;
   const lm = values.launch_momentum;
+  const llm = values.llm_manager;
 
   const config: Config = {
     bot: {
@@ -145,6 +158,8 @@ export function parseConfig(source: string, baseDir: string): Config {
       minCooldownSeconds: risk.min_cooldown_seconds as number,
       maxOrdersPerHour: risk.max_orders_per_hour as number,
       gasReserveWei: risk.gas_reserve_bnb as bigint,
+      maxTotalLossWei: risk.max_total_loss_bnb as bigint,
+      onlyTotalLoss: risk.only_total_loss as boolean,
     },
     meanReversion: {
       enabled: mr.enabled as boolean,
@@ -164,6 +179,13 @@ export function parseConfig(source: string, baseDir: string): Config {
       trailingStopPct: lm.trailing_stop_pct as number,
       timeStopMin: lm.time_stop_min as number,
     },
+    llmManager: {
+      enabled: llm.enabled as boolean,
+      coins: llm.coins as Hex[],
+      pollMinutes: llm.poll_minutes as number,
+      eventTradeWei: llm.event_trade_bnb as bigint,
+      eventNewPoolMinutes: llm.event_new_pool_minutes as number,
+    },
   };
 
   // Settings that are each fine alone and wrong together.
@@ -179,6 +201,14 @@ export function parseConfig(source: string, baseDir: string): Config {
     }
     if (config.bot.referrer && config.bot.wallet && config.bot.referrer.toLowerCase() === config.bot.wallet.toLowerCase()) {
       problems.push("[bot] referrer is your own wallet; a referral to yourself does not count, so leave referrer empty");
+    }
+    if (config.llmManager.enabled && config.llmManager.coins.length === 0) {
+      problems.push("[llm_manager] is enabled but lists no coins; add coin addresses or pool ids (feast-bot pools prints both)");
+    }
+    if (config.llmManager.enabled && config.risk.maxTotalLossWei === 0n) {
+      problems.push(
+        "[llm_manager] is enabled but [risk] max_total_loss_bnb is 0; the total-loss stop is the model's only limit, so set how much BNB the session may lose",
+      );
     }
   }
 
@@ -241,6 +271,19 @@ function checkField(where: string, field: Field, value: TomlValue, baseDir: stri
       if (value === "") return { problem: `${where} cannot be empty` };
       if (/[0-9a-fA-F]{64}/.test(value)) return { problem: `${where} holds a long hex string; it must be a file path, never the key itself` };
       return resolvePath(value, baseDir);
+    }
+    case "coins": {
+      if (!Array.isArray(value)) return { problem: `${where} must be a list of coin addresses or pool ids, like ["0x…"]` };
+      const out: string[] = [];
+      for (const item of value) {
+        if (typeof item !== "string" || !/^0x(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$/.test(item)) {
+          return { problem: `${where} must hold coin addresses (0x and 40 hex digits) or pool ids (0x and 64), as feast-bot pools prints them` };
+        }
+        if (/^0x0{40}$/.test(item)) return { problem: `${where} cannot hold the zero address` };
+        if (!out.includes(item.toLowerCase())) out.push(item.toLowerCase());
+      }
+      if (field.maxItems !== undefined && out.length > field.maxItems) return { problem: `${where} may list at most ${field.maxItems} coins` };
+      return out;
     }
     case "poolIds": {
       if (!Array.isArray(value)) return { problem: `${where} must be a list of pool ids, like ["0x…"]` };

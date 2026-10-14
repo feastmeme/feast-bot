@@ -72,6 +72,62 @@ describe("state", () => {
   });
 });
 
+describe("the session the total-loss stop measures", () => {
+  it("begins from the BNB it is given and the open positions' values, and keeps its BNB by the book", () => {
+    const { io } = memoryIo();
+    const state = State.load("/s.json", io);
+    state.recordBuy({ poolId: ROUTED_POOL.poolId, coin: ROUTED_POOL.coin, strategy: "mean_reversion", coins: 10n, costWei: BNB / 10n, at: NOON - 1 });
+    state.markValue(ROUTED_POOL.coin, BNB / 20n, null);
+    expect(state.sessionLossWei()).toBeNull();
+
+    const session = state.startSession({ at: NOON, cashWei: BNB });
+    expect(session.startEquityWei).toBe(BNB + BNB / 20n);
+    expect(state.sessionLossWei()).toBe(0n);
+
+    // A buy is BNB out and a position in, counted at its cost until it is valued: no loss yet.
+    state.recordBuy({ poolId: BNB_POOL.poolId, coin: BNB_POOL.coin, strategy: "llm_manager", coins: 1000n, costWei: BNB / 10n, at: NOON + 1 });
+    expect(state.session()?.cashWei).toBe(BNB - BNB / 10n);
+    expect(state.sessionLossWei()).toBe(0n);
+    // Valued at half: half its cost is lost.
+    state.markValue(BNB_POOL.coin, BNB / 20n, null);
+    expect(state.sessionLossWei()).toBe(BNB / 20n);
+    // Adding to it counts the new coins at their cost until the next valuation.
+    state.recordBuy({ poolId: BNB_POOL.poolId, coin: BNB_POOL.coin, strategy: "llm_manager", coins: 1000n, costWei: BNB / 10n, at: NOON + 2 });
+    expect(state.position(BNB_POOL.coin)?.lastValueWei).toBe(BNB / 20n + BNB / 10n);
+    expect(state.sessionLossWei()).toBe(BNB / 20n);
+    // Selling half keeps half the value on the rest, and books the result.
+    state.recordSell({ coin: BNB_POOL.coin, strategy: "llm_manager", coins: 1000n, proceedsWei: BNB / 20n, at: NOON + 3 });
+    expect(state.position(BNB_POOL.coin)).toMatchObject({ coins: 1000n, costWei: BNB / 10n, lastValueWei: (BNB / 20n + BNB / 10n) / 2n });
+    expect(state.session()?.realizedWei[BNB_POOL.coin]).toBe(BNB / 20n - BNB / 10n);
+    // Gas a failed transaction burned is a loss too.
+    state.recordCost({ coin: BNB_POOL.coin, gasWei: 10n ** 15n, at: NOON + 4 });
+    expect(state.session()?.cashWei).toBe(BNB - BNB / 10n - BNB / 10n + BNB / 20n - 10n ** 15n);
+    expect(state.equityWei()).toBe(state.session()!.cashWei + BNB / 20n + (BNB / 20n + BNB / 10n) / 2n);
+    expect(state.view(NOON + 5, null).sessionLossWei).toBe(state.sessionLossWei());
+  });
+
+  it("survives a restart, and ends only when asked", () => {
+    const { io } = memoryIo();
+    const state = State.load("/s.json", io);
+    state.startSession({ at: NOON, cashWei: BNB });
+    state.recordBuy({ poolId: BNB_POOL.poolId, coin: BNB_POOL.coin, strategy: "llm_manager", coins: 1n, costWei: BNB / 10n, at: NOON + 1 });
+    state.markValue(BNB_POOL.coin, 0n, null);
+    state.save();
+    const again = State.load("/s.json", io);
+    expect(again.session()).toEqual({ startedAt: NOON, startEquityWei: BNB, cashWei: BNB - BNB / 10n, realizedWei: {} });
+    expect(again.sessionLossWei()).toBe(BNB / 10n);
+    again.endSession();
+    expect(again.session()).toBeNull();
+    expect(again.sessionLossWei()).toBeNull();
+  });
+
+  it("reads a state file written before sessions existed", () => {
+    const { io, files } = memoryIo();
+    files.set("/old.json", JSON.stringify({ version: 1, positions: {}, orders: [], realized: [], entered: {} }));
+    expect(State.load("/old.json", io).session()).toBeNull();
+  });
+});
+
 describe("the logger", () => {
   it("writes one JSON object per line, amounts as exact strings, to stdout and the file alike", () => {
     const out: string[] = [];

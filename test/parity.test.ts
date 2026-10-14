@@ -100,7 +100,7 @@ describe.skipIf(!APP_PRESENT)("the kit against the Feast app's own helpers", () 
     const links = await load<{ hookDataFor: (r: string | null) => string }>("src/app/coin/[address]/links.ts");
     const trader = new Trader({
       reader: new ChainReader(fakeChain()),
-      risk: new Risk({ maxPositionWei: BNB, dailyLossCapWei: BNB, maxSlippageBps: 300, minCooldownSeconds: 0, maxOrdersPerHour: 60, gasReserveWei: 0n, stopFile: "/nonexistent/STOP" }),
+      risk: new Risk({ maxPositionWei: BNB, dailyLossCapWei: BNB, maxSlippageBps: 300, minCooldownSeconds: 0, maxOrdersPerHour: 60, gasReserveWei: 0n, maxTotalLossWei: 0n, onlyTotalLoss: true, stopFile: "/nonexistent/STOP" }),
       log: new Logger({ out: () => {}, file: null }),
       wallet: null,
       sender: null,
@@ -197,7 +197,7 @@ describe("the hook's fee", () => {
   it("is 1% of what reaches the pool — amountIn / 101 — the figure the API documents for 0.01 BNB", async () => {
     const trader = new Trader({
       reader: new ChainReader(fakeChain()),
-      risk: new Risk({ maxPositionWei: BNB, dailyLossCapWei: BNB, maxSlippageBps: 300, minCooldownSeconds: 0, maxOrdersPerHour: 60, gasReserveWei: 0n, stopFile: "/nonexistent/STOP" }),
+      risk: new Risk({ maxPositionWei: BNB, dailyLossCapWei: BNB, maxSlippageBps: 300, minCooldownSeconds: 0, maxOrdersPerHour: 60, gasReserveWei: 0n, maxTotalLossWei: 0n, onlyTotalLoss: true, stopFile: "/nonexistent/STOP" }),
       log: new Logger({ out: () => {}, file: null }),
       wallet: null,
       sender: null,
