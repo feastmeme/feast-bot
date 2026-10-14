@@ -1,0 +1,16 @@
+# Installed and built
+node_modules/
+dist/
+
+# Your own config, key, logs and state never belong in git.
+# bot.example.toml is the only config this folder tracks; keep the key file
+# outside this folder altogether (the example points at ~/.feast-bot/key).
+*.toml
+!bot.example.toml
+*.key
+*.pem
+.env*
+STOP
+*.jsonl
+*.state.json
+*.state.dry.json

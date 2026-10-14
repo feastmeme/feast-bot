@@ -1,0 +1,27 @@
+{
+  "name": "feast-bot-starter",
+  "version": "0.1.0",
+  "description": "A small trading bot for Feast pools on BNB Smart Chain. Runs on your machine, with your wallet. Dry-run by default.",
+  "private": true,
+  "license": "UNLICENSED",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "feast-bot": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json && node -e \"require('node:fs').chmodSync('dist/cli.js', 0o755)\"",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "viem": "^2.56.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.43",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.11"
+  }
+}

@@ -1,0 +1,62 @@
+# feast-bot — example config.
+#
+# Copy it first:   cp bot.example.toml bot.toml
+# Then dry-run:    npx feast-bot run --config bot.toml --once
+#
+# Nothing is ever sent without --live. The limits below are deliberately
+# small; raise them only after you have watched the bot in a dry run.
+# Every setting is described in README.md.
+
+[bot]
+api_base = "https://feast.meme"
+# Any BNB Smart Chain RPC. A paid one is fine: its URL is never printed.
+rpc_url = "https://bsc-dataseed.bnbchain.org"
+# Your wallet's public address (never the key). Optional in a dry run,
+# where quotes are then simulated as this wallet; when live, the key must
+# belong to it.
+wallet = ""
+# For --live only, one of two ways (not both):
+#   key_file = "~/.feast-bot/key"   a file holding the key and nothing else,
+#                                   readable only by you (chmod 600), kept
+#                                   outside this folder;
+#   or leave key_file empty and set BOT_PRIVATE_KEY in the environment.
+key_file = ""
+# Optional: the address that referred you. Never a wallet of your own.
+referrer = ""
+poll_seconds = 60
+# The public API allows 60 requests a minute per caller; stay well under.
+api_requests_per_minute = 30
+log_file = "feast-bot.jsonl"
+state_file = "feast-bot.state.json"
+# Create this file (touch STOP) and the bot places no further orders.
+stop_file = "STOP"
+
+[risk]
+max_position_bnb = "0.05"
+daily_loss_cap_bnb = "0.05"
+max_slippage_bps = 300
+min_cooldown_seconds = 300
+max_orders_per_hour = 6
+gas_reserve_bnb = "0.005"
+
+# Turn on one strategy to start with.
+
+[mean_reversion]
+enabled = false
+# Pool ids from `npx feast-bot pools`: 0x and 64 hex digits each, like
+# pools = ["0x<pool id>", "0x<another pool id>"]
+pools = []
+window_min = 60
+entry_pct = 5
+exit_pct = 5
+order_bnb = "0.01"
+cooldown_min = 30
+
+[launch_momentum]
+enabled = false
+window_min = 30
+min_holders = 20
+min_trades_per_min = 1
+order_bnb = "0.005"
+trailing_stop_pct = 20
+time_stop_min = 120
